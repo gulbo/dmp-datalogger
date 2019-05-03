@@ -45,9 +45,9 @@ THE SOFTWARE.
 // I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
 // for both classes must be in the include path of your project
 #include "I2Cdev.h"
-
 #include "MPU6050_6Axis_MotionApps20.h"
-//#include "MPU6050.h" // not necessary if using MotionApps include file
+#include <SPI.h>
+#include <SD.h>
 
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
 // is used in I2Cdev.h
@@ -112,12 +112,21 @@ MPU6050 mpu;
 // reference (yaw is relative to initial orientation, since no magnetometer
 // is present in this case). Could be quite handy in some cases.
 #define OUTPUT_READABLE_WORLDACCEL
-
 #define OUTPUT_TIME
+//#define OUTPUT_TO_SD
 
 #define INTERRUPT_PIN 4  // use pin 2 on Arduino Uno & most board
-
 #define LED_PIN 2 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
+#define MOSI_PIN
+#define MISO_PIN
+#define CLK_PIN
+#define CS_PIN
+
+#ifdef OUTPUT_TO_SD
+	#define OUT myFile
+#else
+	#define OUT Serial
+#endif
 
 bool blinkState = false;
 
@@ -138,7 +147,9 @@ VectorFloat gravity;    // [x, y, z]            gravity vector
 float euler[3];         // [psi, theta, phi]    Euler angle container
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
-
+// sd card
+File myFile;
+String fileName = "datalog1";
 // ================================================================
 // ===               INTERRUPT DETECTION ROUTINE                ===
 // ================================================================
@@ -175,22 +186,35 @@ void setup() {
 	// 38400 or slower in these cases, or use some kind of external separate
 	// crystal solution for the UART timer.
 	Serial.println("Start!");
+
+	// MPU
+	Serial.print("Initializing MPU...");
 	while(!mpu.testConnection()){
-	  Serial.print(".");
-	  delay(300);
+		Serial.print(".");
+		delay(300);
 	}
-	  
-	// initialize device
-	Serial.println(F("Initializing I2C devices..."));
 	mpu.initialize();
 	pinMode(INTERRUPT_PIN, INPUT);
 
-	// verify connection
-	Serial.println(F("Testing device connections..."));
-	Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+	// SD card
+	#ifdef OUTPUT_TO_SD
+		Serial.print("Initializing SD card...");
+		if (!SD.begin(CS_PIN)) {
+			Serial.println("initialization failed!");
+			while (1);
+		}
+		Serial.println("initialization done.");
+		while (!SD.exists(fileName + ".txt")){
+			static int8_t num = 2;
+			fileName.setCharAt(fileName.length()-1,num);
+			num++;
+		}
+		Serial.println(String("New file: ") + fileName);
+		myFile = SD.open(fileName + ".txt", FILE_WRITE);	
+	#endif
 
 	// wait for ready
-	Serial.println(F("\nSend any character to begin DMP programming and demo: "));
+	Serial.println(F("\nSend any character to begin..."));
 	while (Serial.available() && Serial.read()); // empty buffer
 	while (!Serial.available());                 // wait for data
 	while (Serial.available() && Serial.read()); // empty buffer again
@@ -215,7 +239,7 @@ void setup() {
 		//mpu.setDLPFMode(6);
 		Serial.print("Digital low-pass filter: ");
 		Serial.println(mpu.getDLPFMode());
-		mpu.setRate(39); // 1khz / (1 + 24) = 40 Hz
+		mpu.setRate(12); // 1khz / (1 + 9) = 100 Hz EMPIRICALLY, 38HZ!!!
 		
 		// enable Arduino interrupt detection
 		Serial.print(F("Enabling interrupt detection (Arduino external interrupt "));
@@ -253,7 +277,7 @@ void setup() {
 void loop() {
 	// if programming failed, don't try to do anything
 	if (!dmpReady) {
-	  Serial.println("WTF");
+	  Serial.println("DMP error");
 	  return;
 	}
 
@@ -302,9 +326,8 @@ void loop() {
 		fifoCount -= packetSize;
 
 		#ifdef OUTPUT_TIME
-		  Serial.print("Time:");
-		  Serial.print(millis()/1000.0);
-		  Serial.print("s - ");
+		  OUT.print(millis()/1000.0);
+		  OUT.print("s - ");
 		#endif
 		
 		#ifdef OUTPUT_READABLE_QUATERNION
@@ -362,19 +385,23 @@ void loop() {
 		#ifdef OUTPUT_READABLE_WORLDACCEL
 			// display initial world-frame acceleration, adjusted to remove gravity
 			// and rotated based on known orientation from quaternion
+			static int64_t loops = 0;
+			loops++;
+			OUT.print(loops*1.0/millis()*1000);
+			OUT.print("Hz - ");
 			mpu.dmpGetQuaternion(&q, fifoBuffer);
 			mpu.dmpGetAccel(&aa, fifoBuffer);
 			mpu.dmpGetGravity(&gravity, &q);
 			mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
 			mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-			Serial.print("aworld\t");
-			Serial.print(aaWorld.x);
-			Serial.print("\t");
-			Serial.print(aaWorld.y);
-			Serial.print("\t");
-			Serial.println(aaWorld.z);
+			OUT.print("aworld\t");
+			OUT.print(aaWorld.x);
+			OUT.print("\t");
+			OUT.print(aaWorld.y);
+			OUT.print("\t");
+			OUT.println(aaWorld.z);
 		#endif
-
+		
 		// blink LED to indicate activity
 		blinkState = !blinkState;
 		digitalWrite(LED_PIN, blinkState);
