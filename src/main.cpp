@@ -41,26 +41,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ===============================================
 */
+
 #define DEBUG 1
+
 // I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
 // for both classes must be in the include path of your project
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
 #include <SPI.h>
 #include <SD.h>
-
-// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
-// is used in I2Cdev.h
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-	#include "Wire.h"
-#endif
-
-// class default I2C address is 0x68
-// specific I2C addresses may be passed as a parameter here
-// AD0 low = 0x68 (default for SparkFun breakout and InvenSense evaluation board)
-// AD0 high = 0x69
-MPU6050 mpu;
-//MPU6050 mpu(0x69); // <-- use for AD0 high
+#include "Wire.h"
+#include <WiFi.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
 /* =========================================================================
    NOTE: In addition to connection 3.3v, GND, SDA, and SCL, this sketch
@@ -68,18 +61,6 @@ MPU6050 mpu;
    external interrupt #0 pin. On the Arduino Uno and Mega 2560, this is
    digital I/O pin 2.
  * ========================================================================= */
-
-/* =========================================================================
-   NOTE: Arduino v1.0.1 with the Leonardo board generates a compile error
-   when using Serial.write(buf, len). The Teapot output uses this method.
-   The solution requires a modification to the Arduino USBAPI.h file, which
-   is fortunately simple, but annoying. This will be fixed in the next IDE
-   release. For more info, see these links:
-
-   http://arduino.cc/forum/index.php/topic,109987.0.html
-   http://code.google.com/p/arduino/issues/detail?id=958
- * ========================================================================= */
-
 
 
 // uncomment "OUTPUT_READABLE_QUATERNION" if you want to see the actual
@@ -128,6 +109,16 @@ MPU6050 mpu;
 	#define OUT Serial
 #endif
 
+const char* ssid     = "GULPO";
+const char* password = "f117f117bagonghi";
+
+// class default I2C address is 0x68
+MPU6050 mpu;
+
+// Define NTP Client to get time
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+
 bool blinkState = false;
 
 // MPU control/status vars
@@ -150,15 +141,18 @@ float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gra
 // sd card
 File myFile;
 String fileName = "datalog1";
+
+inline void led_blink() {blinkState = !blinkState;digitalWrite(LED_PIN, blinkState);}
+inline void led_on() {blinkState = 1; digitalWrite(LED_PIN, blinkState);}
+inline void led_off() {blinkState = 0; digitalWrite(LED_PIN, blinkState);}
+
 // ================================================================
 // ===               INTERRUPT DETECTION ROUTINE                ===
 // ================================================================
-
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
 void dataReady_isr() {
    mpuInterrupt = true;
 }
-
 
 
 // ================================================================
@@ -167,25 +161,49 @@ void dataReady_isr() {
 
 void setup() {
 	// join I2C bus (I2Cdev library doesn't do this automatically)
-	#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-		Wire.begin();
-		Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
-	#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-		Fastwire::setup(400, true);
-	#endif
+	Wire.begin();
+	Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
+
+	// configure LED for output
+	pinMode(LED_PIN, OUTPUT);
 
 	// initialize serial communication
-	// (115200 chosen because it is required for Teapot Demo output, but it's
-	// really up to you depending on your project)
 	Serial.begin(115200);
 	while (!Serial); // wait for Leonardo enumeration, others continue immediately
 
-	// NOTE: 8MHz or slower host processors, like the Teensy @ 3.3V or Arduino
-	// Pro Mini running at 3.3V, cannot handle this baud rate reliably due to
-	// the baud timing being too misaligned with processor ticks. You must use
-	// 38400 or slower in these cases, or use some kind of external separate
-	// crystal solution for the UART timer.
 	Serial.println("Start!");
+	// Connect to Wi-Fi network with SSID and password
+	Serial.print("Connecting to ");
+	Serial.print(ssid);
+	WiFi.begin(ssid, password);
+	while (WiFi.status() != WL_CONNECTED) {
+		led_blink();
+		delay(500);
+		Serial.print(".");
+	}
+	Serial.println("");
+	Serial.println("WiFi connected.");
+
+	// Initialize a NTPClient to get time
+	led_on(); //led on while updating time
+	Serial.print("Initializing time client...");
+	delay(1000);
+	timeClient.begin();
+	// GMT+1=3600  1/1/19=1546300800 SummerTime=3600
+	timeClient.setTimeOffset(3600-1546300800+3600);
+	timeClient.setUpdateInterval(INT_MAX);
+	//update timer
+	while (!timeClient.forceUpdate())
+		Serial.print(".");
+	Serial.println();
+	Serial.println("Time updated!");
+	led_off();
+
+	//turn off wifi
+	WiFi.disconnect();
+	WiFi.mode(WIFI_OFF);
+	Serial.println("Wifi turned off.");
+	delay(100);
 
 	// MPU
 	Serial.print("Initializing MPU...");
@@ -193,7 +211,9 @@ void setup() {
 		Serial.print(".");
 		delay(300);
 	}
+	Serial.println();
 	mpu.initialize();
+	Serial.println("MPU ready.");
 	pinMode(INTERRUPT_PIN, INPUT);
 
 	// SD card
@@ -204,6 +224,7 @@ void setup() {
 			while (1);
 		}
 		Serial.println("initialization done.");
+		filename = timeClient.getFormattedDate() + "_" + filename;
 		while (!SD.exists(fileName + ".txt")){
 			static int8_t num = 2;
 			fileName.setCharAt(fileName.length()-1,num);
@@ -212,6 +233,10 @@ void setup() {
 		Serial.println(String("New file: ") + fileName);
 		myFile = SD.open(fileName + ".txt", FILE_WRITE);	
 	#endif
+	OUT.print("***************** ");
+	OUT.print(timeClient.getFormattedDate() + " - ");
+	OUT.print(timeClient.getFormattedTime());
+	OUT.println(" *****************");
 
 	// wait for ready
 	Serial.println(F("\nSend any character to begin..."));
@@ -263,9 +288,6 @@ void setup() {
 		Serial.print(devStatus);
 		Serial.println(F(")"));
 	}
-
-	// configure LED for output
-	pinMode(LED_PIN, OUTPUT);
 }
 
 
@@ -326,7 +348,7 @@ void loop() {
 		fifoCount -= packetSize;
 
 		#ifdef OUTPUT_TIME
-		  OUT.print(millis()/1000.0);
+		  OUT.print(timeClient.getFormattedTime());
 		  OUT.print("s - ");
 		#endif
 		
@@ -403,7 +425,6 @@ void loop() {
 		#endif
 		
 		// blink LED to indicate activity
-		blinkState = !blinkState;
-		digitalWrite(LED_PIN, blinkState);
+		led_blink();
 	}
 }
