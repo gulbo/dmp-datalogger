@@ -94,14 +94,16 @@ THE SOFTWARE.
 // is present in this case). Could be quite handy in some cases.
 #define OUTPUT_READABLE_WORLDACCEL
 #define OUTPUT_TIME
-//#define OUTPUT_TO_SD
+#define OUTPUT_TO_SD
 
 #define INTERRUPT_PIN 4  // use pin 2 on Arduino Uno & most board
-#define LED_PIN 2 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
-#define MOSI_PIN
-#define MISO_PIN
-#define CLK_PIN
-#define CS_PIN
+#define MOSI_PIN 23
+#define MISO_PIN 19
+#define SCK_PIN 18
+#define CS_PIN 5
+#define SD_LED_PIN 15
+#define MPU_LED_PIN 13
+#define BUTTON_PIN 12
 
 #ifdef OUTPUT_TO_SD
 	#define OUT myFile
@@ -139,12 +141,19 @@ float euler[3];         // [psi, theta, phi]    Euler angle container
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
 // sd card
+SPIClass mySPI(VSPI);
 File myFile;
-String fileName = "datalog1";
+String fileName = "datalog";
 
-inline void led_blink() {blinkState = !blinkState;digitalWrite(LED_PIN, blinkState);}
-inline void led_on() {blinkState = 1; digitalWrite(LED_PIN, blinkState);}
-inline void led_off() {blinkState = 0; digitalWrite(LED_PIN, blinkState);}
+inline void led_blink() {blinkState = !blinkState;digitalWrite(BUILTIN_LED, blinkState);}
+inline void led_on(int8_t pin) {blinkState = 1; digitalWrite(pin, blinkState);}
+inline void led_off(int8_t pin) {blinkState = 0; digitalWrite(pin, blinkState);}
+
+void wait_button() {
+	led_on(BUILTIN_LED);
+	while (!digitalRead(BUTTON_PIN));
+	led_off(BUILTIN_LED);
+}
 
 // ================================================================
 // ===               INTERRUPT DETECTION ROUTINE                ===
@@ -163,49 +172,99 @@ void setup() {
 	// join I2C bus (I2Cdev library doesn't do this automatically)
 	Wire.begin();
 	Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
-
-	// configure LED for output
-	pinMode(LED_PIN, OUTPUT);
+	// configure LEDs and BUTTONs
+	pinMode(BUILTIN_LED, OUTPUT);
+	pinMode(SD_LED_PIN, OUTPUT);
+	pinMode(MPU_LED_PIN, OUTPUT);
+	led_off(SD_LED_PIN);
+	led_off(MPU_LED_PIN);
+	pinMode(BUTTON_PIN,INPUT_PULLDOWN);
 
 	// initialize serial communication
 	Serial.begin(115200);
 	while (!Serial); // wait for Leonardo enumeration, others continue immediately
-
+	
+	Serial.println("Press button to start!");
+	wait_button();
 	Serial.println("Start!");
+
 	// Connect to Wi-Fi network with SSID and password
 	Serial.print("Connecting to ");
 	Serial.print(ssid);
 	WiFi.begin(ssid, password);
-	while (WiFi.status() != WL_CONNECTED) {
+	while (WiFi.status() != WL_CONNECTED) { 
 		led_blink();
-		delay(500);
+		delay(300); //wifi blinks every 300ms
 		Serial.print(".");
 	}
 	Serial.println("");
 	Serial.println("WiFi connected.");
 
 	// Initialize a NTPClient to get time
-	led_on(); //led on while updating time
+	led_on(BUILTIN_LED); //led on while updating time
 	Serial.print("Initializing time client...");
 	delay(1000);
 	timeClient.begin();
 	// GMT+1=3600  1/1/19=1546300800 SummerTime=3600
 	timeClient.setTimeOffset(3600-1546300800+3600);
-	timeClient.setUpdateInterval(INT_MAX);
+	timeClient.setUpdateInterval(INT_MAX); //never update! update only in setup
 	//update timer
-	while (!timeClient.forceUpdate())
-		Serial.print(".");
+	while (!timeClient.forceUpdate()){
+		led_blink();
+		Serial.print("."); //NTPclient blinks every second
+	}
 	Serial.println();
 	Serial.println("Time updated!");
-	led_off();
+	led_off(BUILTIN_LED);
 
 	//turn off wifi
 	WiFi.disconnect();
 	WiFi.mode(WIFI_OFF);
 	Serial.println("Wifi turned off.");
-	delay(100);
+	delay(1000);
+
+	// SD card
+	#ifdef OUTPUT_TO_SD
+		led_on(SD_LED_PIN);
+		mySPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
+		Serial.print("Initializing SD card...");
+		while (!SD.begin(CS_PIN, mySPI)) {
+			Serial.println(".");
+			delay(400); 
+		}
+		Serial.println("initialization done.");
+		uint8_t cardType = SD.cardType();
+		if(cardType == CARD_NONE){
+			Serial.println("No SD card attached");
+			while(1);
+		}
+		fileName = "/" + timeClient.getFormattedDate() + "_" + fileName;
+		String incremental_fileName = fileName;
+		while (SD.exists(incremental_fileName + ".txt")){
+			Serial.println(incremental_fileName + " exists!");
+			static int8_t num = 1;
+			incremental_fileName = fileName + num;
+			num++;
+		}
+		fileName = incremental_fileName;
+		Serial.println(String("New file: ") + fileName);
+		myFile = SD.open(fileName + ".txt", FILE_APPEND);	
+	#endif
+
+
+	OUT.print("***************** ");
+	OUT.print(timeClient.getFormattedDate() + " - ");
+	OUT.print(timeClient.getFormattedTime());
+	OUT.println(" *****************");
+	#ifdef OUTPUT_TO_SD
+		myFile.close();
+		delay(500); //signal SD checked keeping led on for 500ms
+	#endif
+	// turn on the SD led to signal all good
+	led_off(SD_LED_PIN);
 
 	// MPU
+	led_on(MPU_LED_PIN);
 	Serial.print("Initializing MPU...");
 	while(!mpu.testConnection()){
 		Serial.print(".");
@@ -215,44 +274,17 @@ void setup() {
 	mpu.initialize();
 	Serial.println("MPU ready.");
 	pinMode(INTERRUPT_PIN, INPUT);
-
-	// SD card
-	#ifdef OUTPUT_TO_SD
-		Serial.print("Initializing SD card...");
-		if (!SD.begin(CS_PIN)) {
-			Serial.println("initialization failed!");
-			while (1);
-		}
-		Serial.println("initialization done.");
-		filename = timeClient.getFormattedDate() + "_" + filename;
-		while (!SD.exists(fileName + ".txt")){
-			static int8_t num = 2;
-			fileName.setCharAt(fileName.length()-1,num);
-			num++;
-		}
-		Serial.println(String("New file: ") + fileName);
-		myFile = SD.open(fileName + ".txt", FILE_WRITE);	
-	#endif
-	OUT.print("***************** ");
-	OUT.print(timeClient.getFormattedDate() + " - ");
-	OUT.print(timeClient.getFormattedTime());
-	OUT.println(" *****************");
+	// signal MPU checked keepeing the led on for 500ms
+	delay(500);
+	led_off(MPU_LED_PIN);
 
 	// wait for ready
-	Serial.println(F("\nSend any character to begin..."));
-	while (Serial.available() && Serial.read()); // empty buffer
-	while (!Serial.available());                 // wait for data
-	while (Serial.available() && Serial.read()); // empty buffer again
+	Serial.println(F("\nPress the button to begin!"));
+	wait_button();
 
 	// load and configure the DMP
 	Serial.println(F("Initializing DMP..."));
 	devStatus = mpu.dmpInitialize();
-
-	// supply your own gyro offsets here, scaled for min sensitivity
-//    mpu.setXGyroOffset(220);
-//    mpu.setYGyroOffset(76);
-//    mpu.setZGyroOffset(-85);
-//    mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
 
 	// make sure it worked (returns 0 if so)
 	if (devStatus == 0) {
@@ -261,11 +293,11 @@ void setup() {
 		mpu.setDMPEnabled(true );
 
 		//set Low-Pass filter
-		//mpu.setDLPFMode(6);
 		Serial.print("Digital low-pass filter: ");
 		Serial.println(mpu.getDLPFMode());
-		mpu.setRate(12); // 1khz / (1 + 9) = 100 Hz EMPIRICALLY, 38HZ!!!
-		
+		mpu.setRate(7); // 1khz / (1 + 11) = 83Hz but EMPIRICALLY, 38HZ!!!
+						 // 1khz / (1 + 7) = 125hz but EMPIRICALLY 63HZ!!!
+
 		// enable Arduino interrupt detection
 		Serial.print(F("Enabling interrupt detection (Arduino external interrupt "));
 		Serial.print(digitalPinToInterrupt(INTERRUPT_PIN));
@@ -299,26 +331,26 @@ void setup() {
 void loop() {
 	// if programming failed, don't try to do anything
 	if (!dmpReady) {
-	  Serial.println("DMP error");
-	  return;
+	  Serial.println("DMP not ready!");
+	  while(1);
 	}
 
    // wait for MPU interrupt or extra packet(s) available
    while (!mpuInterrupt && fifoCount < packetSize) {
-       if (mpuInterrupt && fifoCount < packetSize) {
-         // try to get out of the infinite loop 
-         fifoCount = mpu.getFIFOCount();
-       }  
-       // other program behavior stuff here
-       // .
-       // .
-       // .
-       // if you are really paranoid you can frequently test in between other
-       // stuff to see if mpuInterrupt is true, and if so, "break;" from the
-       // while() loop to immediately process the MPU data
-       // .
-       // .
-       // .
+	   if (mpuInterrupt && fifoCount < packetSize) {
+		 // try to get out of the infinite loop 
+		 fifoCount = mpu.getFIFOCount();
+	   }  
+	   // other program behavior stuff here
+	   // .
+	   // .
+	   // .
+	   // if you are really paranoid you can frequently test in between other
+	   // stuff to see if mpuInterrupt is true, and if so, "break;" from the
+	   // while() loop to immediately process the MPU data
+	   // .
+	   // .
+	   // .
    }
 
    // reset interrupt flag and get INT_STATUS byte
@@ -346,6 +378,10 @@ void loop() {
 		// track FIFO count here in case there is > 1 packet available
 		// (this lets us immediately read more without waiting for an interrupt)
 		fifoCount -= packetSize;
+
+		#ifdef OUTPUT_TO_SD
+			myFile = SD.open(fileName + ".txt", FILE_APPEND);
+		#endif
 
 		#ifdef OUTPUT_TIME
 		  OUT.print(timeClient.getFormattedTime());
@@ -407,23 +443,34 @@ void loop() {
 		#ifdef OUTPUT_READABLE_WORLDACCEL
 			// display initial world-frame acceleration, adjusted to remove gravity
 			// and rotated based on known orientation from quaternion
-			static int64_t loops = 0;
-			loops++;
-			OUT.print(loops*1.0/millis()*1000);
-			OUT.print("Hz - ");
+			// static int64_t loops = 0;
+			// static uint64_t start = millis();
+			// loops++;
+			// OUT.print(loops*1.0/(millis()-start)*1000);
+			// OUT.print("Hz - ");
 			mpu.dmpGetQuaternion(&q, fifoBuffer);
 			mpu.dmpGetAccel(&aa, fifoBuffer);
 			mpu.dmpGetGravity(&gravity, &q);
 			mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
 			mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-			OUT.print("aworld\t");
 			OUT.print(aaWorld.x);
-			OUT.print("\t");
+			OUT.print(" ");
 			OUT.print(aaWorld.y);
-			OUT.print("\t");
+			OUT.print(" ");
 			OUT.println(aaWorld.z);
 		#endif
-		
+
+		#ifdef OUTPUT_TO_SD
+			myFile.close();
+		#endif
+
+		//in case of button pressed, suspend
+		if(digitalRead(BUTTON_PIN)){
+			led_on(BUILTIN_LED);
+			delay(1000);
+			wait_button();
+			delay(200);
+		}
 		// blink LED to indicate activity
 		led_blink();
 	}
