@@ -249,6 +249,8 @@ void setup() {
 		fileName = incremental_fileName;
 		Serial.println(String("New file: ") + fileName);
 		myFile = SD.open(fileName + ".txt", FILE_APPEND);	
+		delay(500); //signal SD checked keeping led on for 500ms
+		led_off(SD_LED_PIN);
 	#endif
 
 
@@ -256,12 +258,7 @@ void setup() {
 	OUT.print(timeClient.getFormattedDate() + " - ");
 	OUT.print(timeClient.getFormattedTime());
 	OUT.println(" *****************");
-	#ifdef OUTPUT_TO_SD
-		myFile.close();
-		delay(500); //signal SD checked keeping led on for 500ms
-	#endif
-	// turn on the SD led to signal all good
-	led_off(SD_LED_PIN);
+	OUT.flush();
 
 	// MPU
 	led_on(MPU_LED_PIN);
@@ -279,6 +276,7 @@ void setup() {
 	led_off(MPU_LED_PIN);
 
 	// wait for ready
+
 	Serial.println(F("\nPress the button to begin!"));
 	wait_button();
 
@@ -311,6 +309,9 @@ void setup() {
 
 		// get expected DMP packet size for later comparison
 		packetSize = mpu.dmpGetFIFOPacketSize();
+		#ifdef OUTPUT_TO_SD
+			Serial.println("Writing to SD!");
+		#endif
 	} else {
 		// ERROR!
 		// 1 = initial memory load failed
@@ -351,6 +352,7 @@ void loop() {
 	   // .
 	   // .
 	   // .
+	   OUT.flush();
    }
 
    // reset interrupt flag and get INT_STATUS byte
@@ -379,13 +381,9 @@ void loop() {
 		// (this lets us immediately read more without waiting for an interrupt)
 		fifoCount -= packetSize;
 
-		#ifdef OUTPUT_TO_SD
-			myFile = SD.open(fileName + ".txt", FILE_APPEND);
-		#endif
-
 		#ifdef OUTPUT_TIME
 		  OUT.print(timeClient.getFormattedTime());
-		  OUT.print("s - ");
+		  OUT.print(" ");
 		#endif
 		
 		#ifdef OUTPUT_READABLE_QUATERNION
@@ -460,16 +458,19 @@ void loop() {
 			OUT.println(aaWorld.z);
 		#endif
 
-		#ifdef OUTPUT_TO_SD
-			myFile.close();
-		#endif
 
 		//in case of button pressed, suspend
 		if(digitalRead(BUTTON_PIN)){
+			#ifdef OUTPUT_TO_SD
+				myFile.close();
+			#endif
 			led_on(BUILTIN_LED);
 			delay(1000);
 			wait_button();
 			delay(200);
+			#ifdef OUTPUT_TO_SD
+				myFile = SD.open(fileName + ".txt", FILE_APPEND);
+			#endif
 		}
 		// blink LED to indicate activity
 		led_blink();
