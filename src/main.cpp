@@ -292,6 +292,7 @@ void setup() {
 
 		//set Low-Pass filter
 		Serial.print("Digital low-pass filter: ");
+		mpu.setDLPFMode(6); //6 is 5hz, default is 3: 44hz
 		Serial.println(mpu.getDLPFMode());
 		mpu.setRate(7); // 1khz / (1 + 11) = 83Hz but EMPIRICALLY, 38HZ!!!
 						 // 1khz / (1 + 7) = 125hz but EMPIRICALLY 63HZ!!!
